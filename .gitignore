@@ -1,0 +1,8 @@
+target/
+node_modules/
+.direnv/
+result
+.devenv/
+.devenv.flake.nix
+devenv.local.nix
+.pre-commit-config.yaml

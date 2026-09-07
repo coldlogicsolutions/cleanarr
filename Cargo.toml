@@ -1,0 +1,25 @@
+[package]
+name = "cleanarr"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Media library cleanup for Radarr, Sonarr and Plex, plus a full Radarr API CLI"
+repository = "https://github.com/derekjw/cleanarr"
+
+[workspace]
+members = ["crates/radarr-api", "crates/radarr-cli"]
+
+[dependencies]
+radarr-api = { path = "crates/radarr-api" }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+comfy-table = "8"
+directories = "6"
+quick-xml = { version = "0.42", features = ["serde", "serialize"] }
+reqwest = { version = "0.13", features = ["json", "query", "form"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+toml = "1"
+uuid = { version = "1", features = ["v4"] }
