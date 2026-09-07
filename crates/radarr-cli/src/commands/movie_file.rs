@@ -7,8 +7,15 @@ use radarr_api::RadarrClient;
 
 #[derive(Subcommand)]
 pub enum MovieFileCommand {
-    /// List movie files
-    List,
+    /// List movie files for a movie, or by movie file ID
+    List {
+        /// List all files belonging to this movie
+        #[arg(long)]
+        movie_id: Option<i64>,
+        /// Comma-separated movie file IDs
+        #[arg(long, value_delimiter = ',')]
+        ids: Vec<i64>,
+    },
     /// Get a movie file by ID
     Get {
         /// Movie file ID
@@ -41,8 +48,25 @@ struct MovieFileResource {
 
 pub async fn run(cmd: MovieFileCommand, api: &RadarrClient, fmt: OutputFormat) -> Result<()> {
     match cmd {
-        MovieFileCommand::List => {
-            let items: Vec<MovieFileResource> = api.get("/api/v3/moviefile").await?;
+        MovieFileCommand::List { movie_id, ids } => {
+            // Radarr's GET /moviefile requires a filter: either movieId or movieFileIds.
+            let owned_query: Vec<(&str, String)> = match (movie_id, ids.is_empty()) {
+                (Some(_), false) => anyhow::bail!(
+                    "Provide either --movie-id or --ids, not both, when listing movie files"
+                ),
+                (None, true) => anyhow::bail!(
+                    "Provide --movie-id <id> or --ids <id,id,...> when listing movie files"
+                ),
+                (Some(movie_id), true) => vec![("movieId", movie_id.to_string())],
+                (None, false) => ids
+                    .iter()
+                    .map(|id| ("movieFileIds", id.to_string()))
+                    .collect(),
+            };
+            let query: Vec<(&str, &str)> =
+                owned_query.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            let items: Vec<MovieFileResource> =
+                api.get_with_query("/api/v3/moviefile", &query).await?;
             match fmt {
                 OutputFormat::Table => {
                     let rows: Vec<Vec<String>> = items

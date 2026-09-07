@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde::Serialize;
 
@@ -26,8 +26,8 @@ pub enum MovieCommand {
         /// Root folder path
         #[arg(long)]
         root_folder_path: String,
-        /// Whether to monitor the movie
-        #[arg(long, default_value = "true")]
+        /// Whether to monitor the movie (true or false)
+        #[arg(long, action = clap::ArgAction::Set, default_value_t = true)]
         monitored: bool,
         /// Minimum availability (announced, inCinemas, released, tba)
         #[arg(long, default_value = "released")]
@@ -131,7 +131,12 @@ struct AddMovieOptions {
 pub async fn run(cmd: MovieCommand, api: &RadarrClient, fmt: OutputFormat) -> Result<()> {
     match cmd {
         MovieCommand::List => {
-            let movies: Vec<MovieResource> = api.get("/api/v3/movie").await?;
+            let raw: serde_json::Value = api.get("/api/v3/movie").await?;
+            if fmt == OutputFormat::Json {
+                return output::print_json(&raw);
+            }
+            let movies: Vec<MovieResource> = serde_json::from_value(raw)
+                .context("Failed to decode movie list from the Radarr API")?;
             match fmt {
                 OutputFormat::Table => {
                     let rows: Vec<Vec<String>> = movies
@@ -171,7 +176,7 @@ pub async fn run(cmd: MovieCommand, api: &RadarrClient, fmt: OutputFormat) -> Re
                         rows,
                     );
                 }
-                OutputFormat::Json => output::print_json(&movies)?,
+                OutputFormat::Json => unreachable!("raw JSON handled above"),
                 OutputFormat::Quiet => {
                     let ids: Vec<String> = movies
                         .iter()
@@ -183,7 +188,12 @@ pub async fn run(cmd: MovieCommand, api: &RadarrClient, fmt: OutputFormat) -> Re
             Ok(())
         }
         MovieCommand::Get { id } => {
-            let movie: MovieResource = api.get(&format!("/api/v3/movie/{id}")).await?;
+            let raw: serde_json::Value = api.get(&format!("/api/v3/movie/{id}")).await?;
+            if fmt == OutputFormat::Json {
+                return output::print_json(&raw);
+            }
+            let movie: MovieResource = serde_json::from_value(raw)
+                .with_context(|| format!("Failed to decode movie {id} from the Radarr API"))?;
             match fmt {
                 OutputFormat::Table => {
                     let rows = vec![vec![
@@ -205,7 +215,7 @@ pub async fn run(cmd: MovieCommand, api: &RadarrClient, fmt: OutputFormat) -> Re
                         rows,
                     );
                 }
-                OutputFormat::Json => output::print_json(&movie)?,
+                OutputFormat::Json => unreachable!("raw JSON handled above"),
                 OutputFormat::Quiet => {
                     println!("{}", movie.id.map(|i| i.to_string()).unwrap_or_default());
                 }
@@ -286,22 +296,32 @@ pub async fn run(cmd: MovieCommand, api: &RadarrClient, fmt: OutputFormat) -> Re
             Ok(())
         }
         MovieCommand::Lookup { term, imdb, tmdb } => {
-            let movies: Vec<MovieResource> = if let Some(term) = term {
+            // The /imdb and /tmdb lookups return a single movie object, not an array.
+            let raw: serde_json::Value = if let Some(term) = term {
                 api.get_with_query("/api/v3/movie/lookup", &[("term", term.as_str())])
                     .await?
             } else if let Some(imdb) = imdb {
-                api.get_with_query("/api/v3/movie/lookup/imdb", &[("imdbId", imdb.as_str())])
-                    .await?
+                let single: serde_json::Value = api
+                    .get_with_query("/api/v3/movie/lookup/imdb", &[("imdbId", imdb.as_str())])
+                    .await?;
+                serde_json::Value::Array(vec![single])
             } else if let Some(tmdb) = tmdb {
                 let tmdb_str = tmdb.to_string();
-                api.get_with_query(
-                    "/api/v3/movie/lookup/tmdb",
-                    &[("tmdbId", tmdb_str.as_str())],
-                )
-                .await?
+                let single: serde_json::Value = api
+                    .get_with_query(
+                        "/api/v3/movie/lookup/tmdb",
+                        &[("tmdbId", tmdb_str.as_str())],
+                    )
+                    .await?;
+                serde_json::Value::Array(vec![single])
             } else {
                 anyhow::bail!("Provide --term, --imdb, or --tmdb for lookup");
             };
+            if fmt == OutputFormat::Json {
+                return output::print_json(&raw);
+            }
+            let movies: Vec<MovieResource> = serde_json::from_value(raw)
+                .context("Failed to decode lookup results from the Radarr API")?;
             match fmt {
                 OutputFormat::Table => {
                     let rows: Vec<Vec<String>> = movies
@@ -317,7 +337,7 @@ pub async fn run(cmd: MovieCommand, api: &RadarrClient, fmt: OutputFormat) -> Re
                         .collect();
                     output::print_table(&["TMDB", "Title", "Year", "IMDB"], rows);
                 }
-                OutputFormat::Json => output::print_json(&movies)?,
+                OutputFormat::Json => unreachable!("raw JSON handled above"),
                 OutputFormat::Quiet => {
                     let ids: Vec<String> = movies
                         .iter()

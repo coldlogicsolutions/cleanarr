@@ -19,11 +19,15 @@ so they can move to their own repository later.
 ## Features
 
 - **One threshold for movies and TV.** Radarr movie size plus Sonarr series
-  size is compared against `--max-size`; both kinds are deletion candidates.
+  size is compared against the threshold (positional or `--max-size`); both kinds are deletion candidates.
 - **Five strategies.** `oldest` (last watched, else added), `oldest-added`,
   `never-watched`, `least-watched`, `oldest-watched`.
 - **Plex-aware.** Movies match by TMDB/IMDB id; episodes match by show id plus
   season and episode number. Works without Plex too, falling back to added date.
+  **Note:** watch statistics reflect only the Plex account that owns the token.
+  Plays by other Plex Home, managed, or shared users are not counted, so on a
+  multi-user server `never-watched` can select items other members of the
+  household have watched.
 - **Safe by default.** Dry run unless `--confirm`. Protected tags can never be
   deleted. Deleted episodes are unmonitored so Sonarr won't re-grab them.
 - **Scriptable.** `--output json` and `--output quiet`, non-zero exit on any
@@ -32,8 +36,8 @@ so they can move to their own repository later.
 ## Install
 
 ```sh
-cargo install --git https://github.com/derekjw/cleanarr cleanarr
-cargo install --git https://github.com/derekjw/cleanarr radarr-cli   # optional
+cargo install --git https://github.com/coldlogicsolutions/cleanarr cleanarr
+cargo install --git https://github.com/coldlogicsolutions/cleanarr radarr-cli   # optional
 ```
 
 Or with [devenv](https://devenv.sh): `devenv shell` gives you the toolchain,
@@ -49,7 +53,11 @@ cleanarr plex login          # browser-based, stores a Plex token
 cleanarr init --protected-tags keep,kids --default-max-size 4TB
 ```
 
-`init` merges into `~/.config/cleanarr/config.toml`:
+`init` merges into `~/.config/cleanarr/config.toml` (or
+`$XDG_CONFIG_HOME/cleanarr/config.toml` when that variable is set), preserving
+any comments and unknown keys already in the file. Only values you pass as
+flags are written — environment variables are never persisted. The file is
+created with mode 0600 on Unix:
 
 ```toml
 [radarr]
@@ -85,6 +93,13 @@ precedence CLI > env > file:
 
 Sonarr and Plex are optional. Without Sonarr only movies are counted and
 deleted. Without Plex the watch-based strategies are unavailable.
+
+> **Watch history is per-account.** Plex reports `viewCount`/`lastViewedAt` for
+> the account that owns `--plex-token` only. Plays by other Plex Home, managed,
+> or shared users never appear, so on a multi-user server the watch-based
+> strategies (`never-watched`, `least-watched`, `oldest-watched`) may select
+> media that other members of the household have watched. Use a token for the
+> account whose viewing should count, and protect anything else with tags.
 
 ## Cleanup
 
@@ -125,13 +140,24 @@ Options:
 | `MAX_SIZE` | Threshold, e.g. `500GB`, `4TB` (SI units). Falls back to config/env. |
 | `--strategy` | `oldest` (default), `oldest-added`, `never-watched`, `least-watched`, `oldest-watched` |
 | `--media` | `all` (default), `movies`, `tv`. Disk usage always counts both. |
-| `--exclude-tag` | Extra protected tag names, comma-separated |
+| `--exclude-tag` | Extra protected tag names, comma-separated (whitespace trimmed) |
+| `--allow-unresolved-tags` | Proceed with `--confirm` even if a protected tag name matches no Radarr/Sonarr tag (otherwise refused) |
 | `--plex-section`, `--plex-tv-section` | Plex library keys; auto-detected when there is exactly one of each type |
 | `--confirm` | Actually delete |
 
 Movies are deleted through Radarr with their files. Episodes have their file
 deleted through Sonarr and are then unmonitored. If any single deletion fails
 the run continues, reports the item, and exits non-zero at the end.
+A file shared by several episodes (e.g. `S01E01-E02`) is one candidate: counted
+once, deleted once, and every episode on it is unmonitored.
+
+Candidates that Plex cannot match (no GUID, not yet scanned, wrong section) have
+unknown watch state. The Plex-based strategies skip them and report the count
+rather than treating them as never watched. With `--output json`, a dry run
+marks every item `"status": "planned"`; a confirmed run emits the document after
+deleting, with per-item `deleted`/`failed` status and top-level `deleted`,
+`failed`, and `freed` counters. Quiet output is always `movie:<id>` or
+`episode:<id>`.
 
 ## radarr-cli
 
@@ -147,7 +173,8 @@ radarr-cli history list --page-size 50 --output json
 ```
 
 Settings: `--url` / `--api-key` / `--output` (`--radarr-url` / `--radarr-api-key` also accepted), env `RADARR_URL` / `RADARR_API_KEY` /
-`RADARR_OUTPUT`, or `~/.config/radarr-cli/config.toml`. Run `radarr-cli --help`
+`RADARR_OUTPUT`, or `~/.config/radarr-cli/config.toml`
+(`$XDG_CONFIG_HOME/radarr-cli/config.toml` when set). Run `radarr-cli --help`
 for the full list and `radarr-cli <command> --help` for each one.
 `radarr-cli completions <shell>` prints shell completions.
 

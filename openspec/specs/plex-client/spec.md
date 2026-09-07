@@ -4,7 +4,7 @@ Read-only Plex Media Server client for library sections, movies, shows, and epis
 ## Requirements
 
 ### Requirement: Plex API authentication
-The system SHALL authenticate with the Plex Media Server using an `X-Plex-Token` query parameter appended to all API requests.
+The system SHALL authenticate with the Plex Media Server by sending the token as an `X-Plex-Token` request header on all API requests. The token SHALL NOT be placed in the request URL (query string), so that it cannot leak into error messages, proxy or access logs, or shell history.
 
 #### Scenario: Valid token
 - **WHEN** a request is made to the Plex API with a valid token
@@ -13,6 +13,10 @@ The system SHALL authenticate with the Plex Media Server using an `X-Plex-Token`
 #### Scenario: Invalid token
 - **WHEN** a request is made to the Plex API with an invalid token
 - **THEN** the system SHALL report an authentication error with a clear message indicating the Plex token is invalid
+
+#### Scenario: Token absent from request URLs and errors
+- **WHEN** a Plex request is built, or fails with a transport error that is reported to the user
+- **THEN** the token SHALL appear only in the `X-Plex-Token` header, never in the query string or in any error message
 
 ### Requirement: List library sections
 The system SHALL fetch all library sections from the Plex server via `GET /library/sections` and return typed section data including the section key, title, and type.
@@ -28,6 +32,8 @@ The system SHALL fetch all library sections from the Plex server via `GET /libra
 ### Requirement: Fetch movies with watch statistics
 The system SHALL fetch all movies from a Plex library section via `GET /library/sections/{id}/all` and return typed movie data including watch statistics.
 
+Watch statistics returned by Plex reflect only the account that owns the configured token: plays by other Plex Home, managed, or shared users are not counted. On a multi-user server this means the `never-watched` strategy may select items that other members of the household have watched.
+
 #### Scenario: Fetch all movies from section
 - **WHEN** the system requests all movies from a Plex library section
 - **THEN** the system SHALL return a list of movies with at minimum: ratingKey, title, year, viewCount (defaulting to 0 if absent), lastViewedAt (as Option), addedAt, and external GUIDs
@@ -35,6 +41,10 @@ The system SHALL fetch all movies from a Plex library section via `GET /library/
 #### Scenario: Movie never watched
 - **WHEN** a movie has never been watched on Plex
 - **THEN** the system SHALL report viewCount as 0 and lastViewedAt as None
+
+#### Scenario: Movie watched only by another Plex user
+- **WHEN** a movie was watched by a Plex Home, managed, or shared user other than the account owning the configured token
+- **THEN** Plex SHALL report viewCount 0 for that movie and the system SHALL treat it as never watched
 
 ### Requirement: Extract external GUIDs from Plex movies
 The system SHALL parse the Guid elements on each Plex movie to extract TMDB and IMDB identifiers for matching against Radarr movies.

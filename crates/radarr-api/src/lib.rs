@@ -7,4 +7,4 @@
 pub mod client;
 pub mod types;
 
-pub use client::RadarrClient;
+pub use client::{RadarrClient, encode_path_segment};

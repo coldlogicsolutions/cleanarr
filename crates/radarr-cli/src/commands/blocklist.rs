@@ -8,7 +8,20 @@ use radarr_api::RadarrClient;
 #[derive(Subcommand)]
 pub enum BlocklistCommand {
     /// List all blocklist entries
-    List,
+    List {
+        /// Page number
+        #[arg(long, default_value = "1")]
+        page: i64,
+        /// Page size
+        #[arg(long, default_value = "20")]
+        page_size: i64,
+        /// Sort key (e.g. date, sourceTitle)
+        #[arg(long)]
+        sort_key: Option<String>,
+        /// Sort direction (ascending or descending)
+        #[arg(long)]
+        sort_dir: Option<String>,
+    },
     /// Get blocklist entries for a movie
     Movie {
         /// Movie ID
@@ -55,8 +68,23 @@ struct BulkDeleteBody {
 
 pub async fn run(cmd: BlocklistCommand, api: &RadarrClient, fmt: OutputFormat) -> Result<()> {
     match cmd {
-        BlocklistCommand::List => {
-            let page: BlocklistPage = api.get("/api/v3/blocklist").await?;
+        BlocklistCommand::List {
+            page: page_num,
+            page_size,
+            sort_key,
+            sort_dir,
+        } => {
+            let page_str = page_num.to_string();
+            let page_size_str = page_size.to_string();
+            let mut query: Vec<(&str, &str)> =
+                vec![("page", &page_str), ("pageSize", &page_size_str)];
+            if let Some(ref key) = sort_key {
+                query.push(("sortKey", key));
+            }
+            if let Some(ref dir) = sort_dir {
+                query.push(("sortDirection", dir));
+            }
+            let page: BlocklistPage = api.get_with_query("/api/v3/blocklist", &query).await?;
             match fmt {
                 OutputFormat::Table => {
                     let rows: Vec<Vec<String>> = page
@@ -76,6 +104,15 @@ pub async fn run(cmd: BlocklistCommand, api: &RadarrClient, fmt: OutputFormat) -
                         &["ID", "Movie ID", "Source Title", "Protocol", "Date"],
                         rows,
                     );
+                    if let Some(total) = page.total_records {
+                        let size = page.page_size.unwrap_or(20).max(1);
+                        println!(
+                            "Page {}/{} ({} total records)",
+                            page.page.unwrap_or(1),
+                            (total + size - 1) / size,
+                            total
+                        );
+                    }
                 }
                 OutputFormat::Json => output::print_json(&page)?,
                 OutputFormat::Quiet => {

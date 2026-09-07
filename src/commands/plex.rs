@@ -30,9 +30,11 @@ pub enum PlexCommand {
     },
 }
 
+/// `radarr` is optional: `libraries` and `movies` are Plex-only, so a Plex-only
+/// install can run them. Only `stats` needs Radarr and errors without it.
 pub async fn run(
     cmd: PlexCommand,
-    radarr: &RadarrClient,
+    radarr: Option<&RadarrClient>,
     plex_config: &Option<PlexConfig>,
     fmt: OutputFormat,
 ) -> Result<()> {
@@ -123,6 +125,7 @@ pub async fn run(
         }
         PlexCommand::Stats { movie_id, section } => {
             // Fetch the Radarr movie to get TMDB/IMDB IDs
+            let radarr = radarr.context(config::RADARR_URL_REQUIRED)?;
             let movie: MovieResource = radarr.get(&format!("/api/v3/movie/{movie_id}")).await?;
 
             let tmdb_id = movie.tmdb_id;
@@ -237,7 +240,12 @@ pub async fn login(plex_url: Option<&str>, cli_config_path: Option<&str>) -> Res
     };
     let client_id = client_id.as_str();
 
-    let http = reqwest::Client::new();
+    // Bound each plex.tv request so a hung connection cannot stall the poll loop.
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("Failed to create HTTP client")?;
 
     // Step 1: Create a PIN
     eprintln!("Requesting Plex authentication PIN...");

@@ -504,9 +504,12 @@ async fn run_log(cmd: LogCommand, api: &RadarrClient, fmt: OutputFormat) -> Resu
             Ok(())
         }
         LogCommand::File { name } => {
-            let content: serde_json::Value = api.get(&format!("/api/v3/log/file/{name}")).await?;
+            // Log files are served as plain text, not JSON.
+            let encoded = radarr_api::encode_path_segment(&name);
+            let content = api.get_text(&format!("/api/v3/log/file/{encoded}")).await?;
             match fmt {
-                OutputFormat::Table | OutputFormat::Json => output::print_json(&content)?,
+                OutputFormat::Table => print!("{content}"),
+                OutputFormat::Json => output::print_json(&serde_json::Value::String(content))?,
                 OutputFormat::Quiet => {}
             }
             Ok(())

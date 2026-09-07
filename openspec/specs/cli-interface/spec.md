@@ -38,8 +38,8 @@ The `radarr-cli` binary SHALL provide subcommands for all Radarr v3 API resource
 - **THEN** the system SHALL call `GET /api/v3/history?page=1&pageSize=20` and display results
 
 #### Scenario: Trigger command
-- **WHEN** the user runs `radarr-cli command run RefreshMovie --movieIds 1,2,3`
-- **THEN** the system SHALL call `POST /api/v3/command` with the appropriate command body
+- **WHEN** the user runs `radarr-cli command run --json '{"name":"RefreshMovie","movieIds":[1,2,3]}'`
+- **THEN** the system SHALL call `POST /api/v3/command` with that body
 
 ### Requirement: Output format selection
 The system SHALL support three output formats selectable via the `--output` flag or config file: `table` (default), `json`, and `quiet`.
@@ -57,7 +57,7 @@ The system SHALL support three output formats selectable via the `--output` flag
 - **THEN** the system SHALL output only essential identifiers (IDs, counts) with no headers or formatting, suitable for piping to other commands
 
 ### Requirement: Global flags
-The `cleanarr` binary SHALL support the following global flags available on all subcommands: `--radarr-url <URL>` (Radarr instance URL), `--radarr-api-key <KEY>` (Radarr API key), `--output <FORMAT>` (table/json/quiet), `--config <PATH>` (config file path override), `--plex-url <URL>` (Plex server URL), `--plex-token <TOKEN>` (Plex authentication token), `--sonarr-url <URL>` (Sonarr instance URL), `--sonarr-api-key <KEY>` (Sonarr API key). The `radarr-cli` binary SHALL support `--url <URL>` and `--api-key <KEY>` (with `--radarr-url` and `--radarr-api-key` accepted as aliases for compatibility with `cleanarr`), `--output <FORMAT>`, and `--config <PATH>` (default `~/.config/radarr-cli/config.toml`), with `RADARR_URL`, `RADARR_API_KEY`, and `RADARR_OUTPUT` as environment fallbacks.
+The `cleanarr` binary SHALL support the following global flags available on all subcommands: `--radarr-url <URL>` (Radarr instance URL), `--radarr-api-key <KEY>` (Radarr API key), `--output <FORMAT>` (table/json/quiet), `--config <PATH>` (config file path override; default `$XDG_CONFIG_HOME/cleanarr/config.toml`, falling back to `~/.config/cleanarr/config.toml`), `--plex-url <URL>` (Plex server URL), `--plex-token <TOKEN>` (Plex authentication token), `--sonarr-url <URL>` (Sonarr instance URL), `--sonarr-api-key <KEY>` (Sonarr API key). The `radarr-cli` binary SHALL support `--url <URL>` and `--api-key <KEY>` (with `--radarr-url` and `--radarr-api-key` accepted as aliases for compatibility with `cleanarr`), `--output <FORMAT>`, and `--config <PATH>` (default `$XDG_CONFIG_HOME/radarr-cli/config.toml`, falling back to `~/.config/radarr-cli/config.toml`), with `RADARR_URL`, `RADARR_API_KEY`, and `RADARR_OUTPUT` as environment fallbacks.
 
 #### Scenario: Override config file path
 - **WHEN** the user provides `--config /path/to/config.toml`
@@ -83,7 +83,7 @@ For paginated API endpoints, the CLI SHALL support `--page` and `--page-size` fl
 - **THEN** the system SHALL request 50 records per page from the API
 
 #### Scenario: Sort by field
-- **WHEN** the user runs `radarr-cli movie list --sort-key sortTitle --sort-dir ascending`
+- **WHEN** the user runs `radarr-cli blocklist list --sort-key date --sort-dir descending`
 - **THEN** the system SHALL pass the sort parameters to the API
 
 ### Requirement: Shell completion generation
@@ -97,7 +97,7 @@ The system SHALL provide a `completions` subcommand that generates shell complet
 For API endpoints that support bulk operations, the CLI SHALL provide corresponding bulk subcommands that accept multiple IDs.
 
 #### Scenario: Bulk delete from blocklist
-- **WHEN** the user runs `radarr-cli blocklist delete --ids 1,2,3`
+- **WHEN** the user runs `radarr-cli blocklist bulk-delete 1,2,3`
 - **THEN** the system SHALL call `DELETE /api/v3/blocklist/bulk` with the specified IDs
 
 #### Scenario: Bulk edit movies

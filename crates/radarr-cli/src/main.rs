@@ -3,9 +3,30 @@ mod config;
 mod output;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 use radarr_api::RadarrClient;
+
+/// Whether `id` was given as an actual command-line flag (as opposed to being
+/// filled in from an `env = ...` fallback or a default).
+fn from_command_line(matches: &ArgMatches, id: &str) -> bool {
+    if matches!(matches.try_contains_id(id), Ok(true))
+        && matches.value_source(id) == Some(ValueSource::CommandLine)
+    {
+        return true;
+    }
+    match matches.subcommand() {
+        Some((_, sub)) => from_command_line(sub, id),
+        None => false,
+    }
+}
+
+/// `Some(value)` only when `id` came from the command line — used by `init` so
+/// environment-derived secrets are never persisted to the config file.
+fn flag_only(matches: &ArgMatches, id: &str, value: &Option<String>) -> Option<String> {
+    value.clone().filter(|_| from_command_line(matches, id))
+}
 
 #[derive(Parser)]
 #[command(
@@ -31,7 +52,8 @@ pub struct Cli {
     #[arg(long, short, global = true, env = "RADARR_OUTPUT")]
     output: Option<String>,
 
-    /// Path to config file (default: ~/.config/radarr-cli/config.toml)
+    /// Path to config file (default: $XDG_CONFIG_HOME/radarr-cli/config.toml,
+    /// else ~/.config/radarr-cli/config.toml)
     #[arg(long, global = true)]
     config: Option<String>,
 
@@ -227,7 +249,12 @@ pub enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    // Parse via ArgMatches so `init` can tell explicit flags from env fallbacks.
+    let matches = Cli::command().get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => e.exit(),
+    };
 
     if let Commands::Completions { shell } = &cli.command {
         let mut cmd = <Cli as clap::CommandFactory>::command();
@@ -236,13 +263,17 @@ async fn main() -> Result<()> {
     }
 
     if let Commands::Init = &cli.command {
-        if cli.url.is_none() && cli.api_key.is_none() {
+        // Only values typed as flags are persisted; env vars stay runtime-only
+        // so `init` never writes secrets the user did not ask it to save.
+        let url = flag_only(&matches, "url", &cli.url);
+        let api_key = flag_only(&matches, "api_key", &cli.api_key);
+        if url.is_none() && api_key.is_none() {
             anyhow::bail!(
                 "Provide settings to save: --url, --api-key (or --radarr-url, --radarr-api-key)\n\
                  Example: radarr-cli init --url http://localhost:7878 --api-key YOUR_KEY"
             );
         }
-        let path = config::save(cli.config.as_deref(), cli.url.clone(), cli.api_key.clone())?;
+        let path = config::save(cli.config.as_deref(), url, api_key)?;
         eprintln!("Configuration saved to {}", path.display());
         return Ok(());
     }

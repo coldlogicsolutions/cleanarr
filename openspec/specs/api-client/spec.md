@@ -3,16 +3,20 @@ Authenticated HTTP client for the Radarr v3 API with typed JSON handling and con
 
 ## Requirements
 
-### Requirement: Generated HTTP client from OpenAPI spec
-The system SHALL generate a typed Rust HTTP client from the Radarr v3 OpenAPI specification (`openapi.json`) using progenitor. The generated client SHALL cover all 237 API endpoints with strongly-typed request and response models derived from the 137 API schemas.
+### Requirement: Thin hand-written HTTP client
+The `radarr-api` crate SHALL provide a hand-written client (`RadarrClient`) over reqwest: callers choose the endpoint path and the response type (any `serde::Deserialize` type, including `serde_json::Value`), and the client handles authentication, JSON encoding, timeouts, and error reporting. Commonly shared resource types (e.g. `MovieResource`) live in `radarr_api::types`; command modules define their own projections otherwise. No code generation or bundled OpenAPI document is used; the upstream specification is available from the Radarr repository or a running instance when needed.
 
-#### Scenario: Client generation at build time
-- **WHEN** the project is built with `cargo build`
-- **THEN** the build process SHALL generate a Rust client module from `openapi.json` with typed methods for every API endpoint
+#### Scenario: Typed or raw responses
+- **WHEN** a caller invokes `api.get::<T>(path)`
+- **THEN** the response body SHALL be deserialized into `T`, which may be a typed struct or raw `serde_json::Value`
 
-#### Scenario: Type safety for API calls
-- **WHEN** a CLI command invokes an API endpoint
-- **THEN** the request parameters and response body SHALL be represented as typed Rust structs, not raw JSON
+#### Scenario: Client hardening
+- **WHEN** the client is constructed
+- **THEN** it SHALL set a connect timeout and an overall request timeout and SHALL NOT follow HTTP redirects, so the API key header is never forwarded to another origin
+
+#### Scenario: Error messages identify the request
+- **WHEN** a request fails with a non-success status or an unparseable body
+- **THEN** the error SHALL include the HTTP method and URL (and, for parse failures, the content type and the start of the body)
 
 ### Requirement: Authentication via API key
 The system SHALL authenticate all API requests by including the Radarr API key as the `X-Api-Key` HTTP header on every request.
@@ -38,7 +42,7 @@ The system SHALL support configuring the Radarr instance URL and API key through
 
 #### Scenario: Config file provides defaults
 - **WHEN** no CLI flags or env vars are set
-- **THEN** the system SHALL read connection settings from `~/.config/cleanarr/config.toml`
+- **THEN** the system SHALL read connection settings from `$XDG_CONFIG_HOME/cleanarr/config.toml`, falling back to `~/.config/cleanarr/config.toml` when `XDG_CONFIG_HOME` is unset or not absolute (on every platform)
 
 #### Scenario: Config file does not exist
 - **WHEN** no config file exists and no flags or env vars are provided

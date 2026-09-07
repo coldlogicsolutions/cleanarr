@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::config::PlexConfig;
 
@@ -120,15 +121,47 @@ fn parse_external_ids(guids: &[GuidElement]) -> PlexExternalIds {
 
 // Watch data for matching
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PlexWatchData {
     pub view_count: u64,
     pub last_viewed_at: Option<i64>,
 }
 
+impl PlexWatchData {
+    /// Fold another record for the same logical item into this one, keeping the
+    /// strongest evidence of a watch: the highest view count and most recent
+    /// last-viewed timestamp. Plex can list the same title more than once
+    /// (multiple editions, duplicate files, a show in two folders), and losing
+    /// the watched copy would make `never-watched` delete watched media.
+    fn merge(&mut self, other: &PlexWatchData) {
+        self.view_count = self.view_count.max(other.view_count);
+        self.last_viewed_at = match (self.last_viewed_at, other.last_viewed_at) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+    }
+}
+
+fn merge_into<K: std::hash::Hash + Eq>(
+    map: &mut HashMap<K, PlexWatchData>,
+    key: K,
+    data: PlexWatchData,
+) {
+    map.entry(key).or_default().merge(&data);
+}
+
+/// Query parameters for a Plex request. The auth token is deliberately NOT
+/// included here: it is sent as the `X-Plex-Token` header so it never lands in
+/// a URL (error messages, proxy logs, shell history).
+fn build_query_params<'a>(extra_params: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    extra_params.to_vec()
+}
+
 impl PlexClient {
     pub fn new(config: &PlexConfig) -> Result<Self> {
         let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(120))
             .build()
             .context("Failed to create Plex HTTP client")?;
 
@@ -143,15 +176,16 @@ impl PlexClient {
 
     async fn get_xml(&self, path: &str, extra_params: &[(&str, &str)]) -> Result<String> {
         let url = format!("{}{}", self.base_url, path);
-        let mut query: Vec<(&str, &str)> = vec![("X-Plex-Token", &self.token)];
-        query.extend_from_slice(extra_params);
+        let query = build_query_params(extra_params);
         let resp = self
             .http
             .get(&url)
             .query(&query)
             .header("Accept", "application/xml")
+            .header("X-Plex-Token", &self.token)
             .send()
             .await
+            .map_err(|e| e.without_url())
             .with_context(|| format!("Failed to connect to Plex at {url}"))?;
 
         let status = resp.status();
@@ -165,6 +199,7 @@ impl PlexClient {
 
         resp.text()
             .await
+            .map_err(|e| e.without_url())
             .with_context(|| format!("Failed to read Plex response from {url}"))
     }
 
@@ -302,17 +337,17 @@ pub fn match_movies(
     radarr_movies: &[(i64, Option<i64>, Option<String>)], // (id, tmdb_id, imdb_id)
     plex_movies: &[Video],
 ) -> HashMap<i64, PlexWatchData> {
-    // Build Plex lookup indexes
-    let mut plex_by_tmdb: HashMap<i64, &Video> = HashMap::new();
-    let mut plex_by_imdb: HashMap<String, &Video> = HashMap::new();
+    // Build Plex lookup indexes, merging duplicates that share an external id
+    let mut plex_by_tmdb: HashMap<i64, PlexWatchData> = HashMap::new();
+    let mut plex_by_imdb: HashMap<String, PlexWatchData> = HashMap::new();
 
     for video in plex_movies {
         let ids = video.external_ids();
         if let Some(tmdb) = ids.tmdb_id {
-            plex_by_tmdb.insert(tmdb, video);
+            merge_into(&mut plex_by_tmdb, tmdb, video.watch_data());
         }
         if let Some(imdb) = ids.imdb_id {
-            plex_by_imdb.insert(imdb, video);
+            merge_into(&mut plex_by_imdb, imdb, video.watch_data());
         }
     }
 
@@ -324,8 +359,8 @@ pub fn match_movies(
                 .and_then(|id| plex_by_imdb.get(id.as_str()))
         });
 
-        if let Some(video) = matched {
-            result.insert(*radarr_id, video.watch_data());
+        if let Some(data) = matched {
+            result.insert(*radarr_id, data.clone());
         }
     }
 
@@ -377,51 +412,61 @@ pub fn match_episodes(
     plex_shows: &[Show],
     plex_episodes: &[Episode],
 ) -> HashMap<i64, PlexWatchData> {
-    let mut show_by_tvdb: HashMap<i64, &str> = HashMap::new();
-    let mut show_by_tmdb: HashMap<i64, &str> = HashMap::new();
-    let mut show_by_imdb: HashMap<String, &str> = HashMap::new();
+    // A single external id can map to several Plex shows (the same series in two
+    // folders, or a duplicated entry), so keep every rating key per id.
+    let mut show_by_tvdb: HashMap<i64, Vec<&str>> = HashMap::new();
+    let mut show_by_tmdb: HashMap<i64, Vec<&str>> = HashMap::new();
+    let mut show_by_imdb: HashMap<String, Vec<&str>> = HashMap::new();
     for show in plex_shows {
         let ids = show.external_ids();
         if let Some(id) = ids.tvdb_id {
-            show_by_tvdb.insert(id, &show.rating_key);
+            show_by_tvdb.entry(id).or_default().push(&show.rating_key);
         }
         if let Some(id) = ids.tmdb_id {
-            show_by_tmdb.insert(id, &show.rating_key);
+            show_by_tmdb.entry(id).or_default().push(&show.rating_key);
         }
         if let Some(id) = ids.imdb_id {
-            show_by_imdb.insert(id, &show.rating_key);
+            show_by_imdb.entry(id).or_default().push(&show.rating_key);
         }
     }
 
-    // Sonarr series id -> Plex show rating key
-    let mut series_to_show: HashMap<i64, &str> = HashMap::new();
+    // Sonarr series id -> Plex show rating keys
+    let mut series_to_shows: HashMap<i64, &[&str]> = HashMap::new();
     for (series_id, ids) in series {
-        let key = ids
+        let keys = ids
             .tvdb_id
             .and_then(|id| show_by_tvdb.get(&id))
             .or_else(|| ids.tmdb_id.and_then(|id| show_by_tmdb.get(&id)))
             .or_else(|| ids.imdb_id.as_deref().and_then(|id| show_by_imdb.get(id)));
-        if let Some(key) = key {
-            series_to_show.insert(*series_id, key);
+        if let Some(keys) = keys {
+            series_to_shows.insert(*series_id, keys.as_slice());
         }
     }
 
-    // (show rating key, season, episode) -> Plex episode
-    let mut plex_index: HashMap<(&str, i64, i64), &Episode> = HashMap::new();
+    // (show rating key, season, episode) -> merged watch data
+    let mut plex_index: HashMap<(&str, i64, i64), PlexWatchData> = HashMap::new();
     for ep in plex_episodes {
         if let (Some(show_key), Some((s, e))) = (ep.show_rating_key.as_deref(), ep.season_episode())
         {
-            plex_index.insert((show_key, s, e), ep);
+            merge_into(&mut plex_index, (show_key, s, e), ep.watch_data());
         }
     }
 
     let mut result = HashMap::new();
     for (episode_id, series_id, season, episode) in episodes {
-        if let Some(ep) = series_to_show
-            .get(series_id)
-            .and_then(|show_key| plex_index.get(&(*show_key, *season, *episode)))
-        {
-            result.insert(*episode_id, ep.watch_data());
+        let Some(show_keys) = series_to_shows.get(series_id) else {
+            continue;
+        };
+        let mut matched: Option<PlexWatchData> = None;
+        for show_key in show_keys.iter() {
+            if let Some(data) = plex_index.get(&(*show_key, *season, *episode)) {
+                matched
+                    .get_or_insert_with(PlexWatchData::default)
+                    .merge(data);
+            }
+        }
+        if let Some(data) = matched {
+            result.insert(*episode_id, data);
         }
     }
     result
@@ -508,6 +553,82 @@ mod tests {
         assert_eq!(m[&33].view_count, 5);
         assert!(!m.contains_key(&44), "unmatched show");
         assert!(!m.contains_key(&12), "unmatched episode number");
+    }
+
+    fn movie(key: &str, guids: &[&str], views: &str, last: Option<&str>) -> Video {
+        Video {
+            rating_key: key.into(),
+            title: format!("Movie {key}"),
+            year: None,
+            view_count: Some(views.into()),
+            last_viewed_at: last.map(String::from),
+            guids: guids.iter().map(|g| guid(g)).collect(),
+        }
+    }
+
+    #[test]
+    fn merges_duplicate_movies_sharing_an_external_id() {
+        // Watched 4K edition listed first, unwatched 1080p edition second.
+        let plex = vec![
+            movie("1", &["tmdb://949"], "3", Some("1700")),
+            movie("2", &["tmdb://949"], "0", None),
+        ];
+        let radarr = vec![(7, Some(949), None)];
+        let m = match_movies(&radarr, &plex);
+        assert_eq!(m[&7].view_count, 3, "duplicate must not erase watch count");
+        assert_eq!(m[&7].last_viewed_at, Some(1700));
+
+        // Same, with the unwatched copy first.
+        let plex = vec![
+            movie("2", &["imdb://tt0113277"], "0", None),
+            movie("1", &["imdb://tt0113277"], "5", Some("1800")),
+        ];
+        let radarr = vec![(8, None, Some("tt0113277".to_string()))];
+        let m = match_movies(&radarr, &plex);
+        assert_eq!(m[&8].view_count, 5);
+        assert_eq!(m[&8].last_viewed_at, Some(1800));
+    }
+
+    #[test]
+    fn merges_duplicate_shows_and_episodes() {
+        // Two Plex shows share tvdb://100; only the first one's episode is watched.
+        let shows = vec![show("10", &["tvdb://100"]), show("11", &["tvdb://100"])];
+        let eps = vec![
+            ep("10", 1, 1, "4", Some("900")),
+            ep("11", 1, 1, "0", None),
+            // Two duplicate episode rows under the same show/season/episode.
+            ep("10", 2, 2, "0", None),
+            ep("10", 2, 2, "2", Some("950")),
+        ];
+        let series = vec![(
+            1,
+            SeriesIds {
+                tvdb_id: Some(100),
+                ..Default::default()
+            },
+        )];
+        let refs = vec![(11, 1, 1, 1), (22, 1, 2, 2)];
+        let m = match_episodes(&series, &refs, &shows, &eps);
+        assert_eq!(m[&11].view_count, 4, "duplicate show must not erase views");
+        assert_eq!(m[&11].last_viewed_at, Some(900));
+        assert_eq!(
+            m[&22].view_count, 2,
+            "duplicate episode must not erase views"
+        );
+        assert_eq!(m[&22].last_viewed_at, Some(950));
+    }
+
+    #[test]
+    fn query_params_never_contain_the_token() {
+        let params = build_query_params(&[("includeGuids", "1"), ("type", "4")]);
+        assert_eq!(params, vec![("includeGuids", "1"), ("type", "4")]);
+        assert!(
+            !params
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("X-Plex-Token") || v.contains("token")),
+            "the Plex token must be sent as a header, never as a query parameter"
+        );
+        assert!(build_query_params(&[]).is_empty());
     }
 
     #[test]

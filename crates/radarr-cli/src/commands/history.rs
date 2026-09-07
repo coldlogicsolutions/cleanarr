@@ -21,7 +21,9 @@ pub enum HistoryCommand {
         /// Sort direction (ascending or descending)
         #[arg(long)]
         sort_dir: Option<String>,
-        /// Filter by event type (e.g. grabbed, downloadFolderImported, downloadFailed, deleted)
+        /// Filter by event type: grabbed, downloadFolderImported, downloadFailed,
+        /// movieFileDeleted, movieFolderImported, movieFileRenamed, downloadIgnored
+        /// (a raw numeric MovieHistoryEventType is also accepted)
         #[arg(long)]
         event_type: Option<String>,
     },
@@ -82,6 +84,7 @@ pub async fn run(cmd: HistoryCommand, api: &RadarrClient, fmt: OutputFormat) -> 
             if let Some(ref dir) = sort_dir {
                 query.push(("sortDirection", dir));
             }
+            let event_type = event_type.as_deref().map(event_type_value).transpose()?;
             if let Some(ref et) = event_type {
                 query.push(("eventType", et));
             }
@@ -130,6 +133,38 @@ pub async fn run(cmd: HistoryCommand, api: &RadarrClient, fmt: OutputFormat) -> 
     }
 }
 
+/// Radarr's `MovieHistoryEventType` enum, keyed by the name the API documents.
+const EVENT_TYPES: &[(&str, i32)] = &[
+    ("grabbed", 1),
+    ("downloadFolderImported", 3),
+    ("downloadFailed", 4),
+    ("movieFileDeleted", 6),
+    ("movieFolderImported", 7),
+    ("movieFileRenamed", 8),
+    ("downloadIgnored", 9),
+];
+
+/// Translate a user-supplied `--event-type` into the numeric value Radarr expects.
+///
+/// Accepts a documented event name (case-insensitively) or a raw number.
+fn event_type_value(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+    if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Ok(trimmed.to_string());
+    }
+    EVENT_TYPES
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(trimmed))
+        .map(|(_, value)| value.to_string())
+        .ok_or_else(|| {
+            let names: Vec<&str> = EVENT_TYPES.iter().map(|(name, _)| *name).collect();
+            anyhow::anyhow!(
+                "Unknown --event-type '{input}'. Expected one of: {} (or a raw numeric event type)",
+                names.join(", ")
+            )
+        })
+}
+
 fn print_history_list(records: &[HistoryResource], fmt: OutputFormat) -> Result<()> {
     match fmt {
         OutputFormat::Table => {
@@ -168,4 +203,39 @@ fn print_history_list(records: &[HistoryResource], fmt: OutputFormat) -> Result<
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_documented_event_names() {
+        assert_eq!(event_type_value("grabbed").unwrap(), "1");
+        assert_eq!(event_type_value("downloadFolderImported").unwrap(), "3");
+        assert_eq!(event_type_value("downloadFailed").unwrap(), "4");
+        assert_eq!(event_type_value("movieFileDeleted").unwrap(), "6");
+        assert_eq!(event_type_value("movieFolderImported").unwrap(), "7");
+        assert_eq!(event_type_value("movieFileRenamed").unwrap(), "8");
+        assert_eq!(event_type_value("downloadIgnored").unwrap(), "9");
+    }
+
+    #[test]
+    fn event_names_are_case_insensitive_and_trimmed() {
+        assert_eq!(event_type_value("GRABBED").unwrap(), "1");
+        assert_eq!(event_type_value(" downloadfailed ").unwrap(), "4");
+    }
+
+    #[test]
+    fn raw_numbers_pass_through() {
+        assert_eq!(event_type_value("9").unwrap(), "9");
+        assert_eq!(event_type_value(" 3 ").unwrap(), "3");
+    }
+
+    #[test]
+    fn unknown_names_error_with_the_valid_list() {
+        let err = event_type_value("deleted").unwrap_err().to_string();
+        assert!(err.contains("Unknown --event-type 'deleted'"), "{err}");
+        assert!(err.contains("movieFileDeleted"), "{err}");
+    }
 }

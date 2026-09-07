@@ -237,13 +237,12 @@ pub async fn run(cmd: QueueCommand, api: &RadarrClient, fmt: OutputFormat) -> Re
             remove_from_client,
             blocklist,
         } => {
-            let mut query = vec![];
-            if remove_from_client {
-                query.push(("removeFromClient", "true"));
-            }
-            if blocklist {
-                query.push(("blocklist", "true"));
-            }
+            // Radarr defaults removeFromClient to true server-side, so both flags
+            // must always be sent explicitly to match what the user asked for.
+            let query = [
+                ("removeFromClient", bool_str(remove_from_client)),
+                ("blocklist", bool_str(blocklist)),
+            ];
             api.delete_with_query(&format!("/api/v3/queue/{id}"), &query)
                 .await?;
             match fmt {
@@ -264,6 +263,11 @@ pub async fn run(cmd: QueueCommand, api: &RadarrClient, fmt: OutputFormat) -> Re
             Ok(())
         }
     }
+}
+
+/// Render a flag as the literal `true`/`false` Radarr expects in a query string.
+fn bool_str(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
 }
 
 fn format_size_f64(bytes: f64) -> String {

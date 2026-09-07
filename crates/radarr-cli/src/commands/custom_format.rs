@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +46,12 @@ struct CustomFormatResource {
 pub async fn run(cmd: CustomFormatCommand, api: &RadarrClient, fmt: OutputFormat) -> Result<()> {
     match cmd {
         CustomFormatCommand::List => {
-            let formats: Vec<CustomFormatResource> = api.get("/api/v3/customformat").await?;
+            let raw: serde_json::Value = api.get("/api/v3/customformat").await?;
+            if fmt == OutputFormat::Json {
+                return output::print_json(&raw);
+            }
+            let formats: Vec<CustomFormatResource> = serde_json::from_value(raw)
+                .context("Failed to decode custom format list from the Radarr API")?;
             match fmt {
                 OutputFormat::Table => {
                     let rows: Vec<Vec<String>> = formats
@@ -66,7 +71,7 @@ pub async fn run(cmd: CustomFormatCommand, api: &RadarrClient, fmt: OutputFormat
                         .collect();
                     output::print_table(&["ID", "Name", "Include When Renaming"], rows);
                 }
-                OutputFormat::Json => output::print_json(&formats)?,
+                OutputFormat::Json => unreachable!("raw JSON handled above"),
                 OutputFormat::Quiet => {
                     let ids: Vec<String> = formats
                         .iter()
@@ -78,8 +83,13 @@ pub async fn run(cmd: CustomFormatCommand, api: &RadarrClient, fmt: OutputFormat
             Ok(())
         }
         CustomFormatCommand::Get { id } => {
-            let format: CustomFormatResource =
-                api.get(&format!("/api/v3/customformat/{id}")).await?;
+            let raw: serde_json::Value = api.get(&format!("/api/v3/customformat/{id}")).await?;
+            if fmt == OutputFormat::Json {
+                return output::print_json(&raw);
+            }
+            let format: CustomFormatResource = serde_json::from_value(raw).with_context(|| {
+                format!("Failed to decode custom format {id} from the Radarr API")
+            })?;
             match fmt {
                 OutputFormat::Table => {
                     let rows = vec![vec![
@@ -94,7 +104,7 @@ pub async fn run(cmd: CustomFormatCommand, api: &RadarrClient, fmt: OutputFormat
                     ]];
                     output::print_table(&["ID", "Name", "Include When Renaming"], rows);
                 }
-                OutputFormat::Json => output::print_json(&format)?,
+                OutputFormat::Json => unreachable!("raw JSON handled above"),
                 OutputFormat::Quiet => {
                     println!("{}", format.id.map(|i| i.to_string()).unwrap_or_default());
                 }
@@ -103,7 +113,12 @@ pub async fn run(cmd: CustomFormatCommand, api: &RadarrClient, fmt: OutputFormat
         }
         CustomFormatCommand::Create { json } => {
             let body: serde_json::Value = serde_json::from_str(&json)?;
-            let format: CustomFormatResource = api.post("/api/v3/customformat", &body).await?;
+            let raw: serde_json::Value = api.post("/api/v3/customformat", &body).await?;
+            if fmt == OutputFormat::Json {
+                return output::print_json(&raw);
+            }
+            let format: CustomFormatResource = serde_json::from_value(raw)
+                .context("Failed to decode the created custom format from the Radarr API")?;
             match fmt {
                 OutputFormat::Table => {
                     println!(
@@ -112,7 +127,7 @@ pub async fn run(cmd: CustomFormatCommand, api: &RadarrClient, fmt: OutputFormat
                         format.id.map(|i| i.to_string()).unwrap_or_default()
                     );
                 }
-                OutputFormat::Json => output::print_json(&format)?,
+                OutputFormat::Json => unreachable!("raw JSON handled above"),
                 OutputFormat::Quiet => {
                     println!("{}", format.id.map(|i| i.to_string()).unwrap_or_default());
                 }
@@ -121,9 +136,15 @@ pub async fn run(cmd: CustomFormatCommand, api: &RadarrClient, fmt: OutputFormat
         }
         CustomFormatCommand::Update { id, json } => {
             let body: serde_json::Value = serde_json::from_str(&json)?;
-            let cf: CustomFormatResource = api
+            let raw: serde_json::Value = api
                 .put(&format!("/api/v3/customformat/{id}"), &body)
                 .await?;
+            if fmt == OutputFormat::Json {
+                return output::print_json(&raw);
+            }
+            let cf: CustomFormatResource = serde_json::from_value(raw).with_context(|| {
+                format!("Failed to decode the updated custom format {id} from the Radarr API")
+            })?;
             match fmt {
                 OutputFormat::Table => {
                     println!(
@@ -132,7 +153,7 @@ pub async fn run(cmd: CustomFormatCommand, api: &RadarrClient, fmt: OutputFormat
                         cf.id.map(|i| i.to_string()).unwrap_or_default()
                     );
                 }
-                OutputFormat::Json => output::print_json(&cf)?,
+                OutputFormat::Json => unreachable!("raw JSON handled above"),
                 OutputFormat::Quiet => {
                     println!("{}", cf.id.map(|i| i.to_string()).unwrap_or_default());
                 }

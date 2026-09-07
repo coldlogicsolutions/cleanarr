@@ -6,3 +6,4 @@ result
 .devenv.flake.nix
 devenv.local.nix
 .pre-commit-config.yaml
+/docs/reviews/

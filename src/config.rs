@@ -1,6 +1,11 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Message shown when a command needs Radarr but no Radarr URL is configured.
+pub const RADARR_URL_REQUIRED: &str = "Radarr URL is required. Set via --radarr-url, RADARR_URL env var, or [radarr] url in the config file.";
+/// Message shown when a command needs Radarr but no Radarr API key is configured.
+pub const RADARR_API_KEY_REQUIRED: &str = "Radarr API key is required. Set via --radarr-api-key, RADARR_API_KEY env var, or [radarr] api_key in the config file.";
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct ConfigFile {
@@ -73,10 +78,19 @@ pub struct SonarrConfig {
     pub api_key: String,
 }
 
-#[derive(Debug)]
-pub struct AppConfig {
+#[derive(Debug, Clone)]
+pub struct RadarrConfig {
     pub url: String,
     pub api_key: String,
+}
+
+#[derive(Debug)]
+pub struct AppConfig {
+    /// Radarr connection, when both a URL and an API key are configured.
+    /// Plex-only commands run without it.
+    pub radarr: Option<RadarrConfig>,
+    /// Why `radarr` is `None`, so the original message can be reported lazily.
+    radarr_error: Option<&'static str>,
     pub output_format: crate::output::OutputFormat,
     pub plex: Option<PlexConfig>,
     pub sonarr: Option<SonarrConfig>,
@@ -101,14 +115,22 @@ pub fn parse_tag_list(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Union tag lists, deduplicating case-insensitively while preserving first-seen order.
+/// Union tag lists, trimming each entry, dropping empties, and deduplicating
+/// case-insensitively while preserving first-seen order.
+///
+/// This is the single normalisation point for all three tag sources
+/// (config file, `CLEANARR_PROTECTED_TAGS`, `--exclude-tag`).
 pub fn merge_tags<'a>(lists: impl IntoIterator<Item = &'a [String]>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for list in lists {
         for t in list {
+            let t = t.trim();
+            if t.is_empty() {
+                continue;
+            }
             if seen.insert(t.to_lowercase()) {
-                out.push(t.clone());
+                out.push(t.to_string());
             }
         }
     }
@@ -132,16 +154,20 @@ impl AppConfig {
         let url = cli_url
             .map(String::from)
             .or_else(|| std::env::var("RADARR_URL").ok())
-            .or(config_file.radarr.url)
-            .context("Radarr URL is required. Set via --radarr-url, RADARR_URL env var, or [radarr] url in the config file.")?;
+            .or(config_file.radarr.url);
 
         let api_key = cli_api_key
             .map(String::from)
             .or_else(|| std::env::var("RADARR_API_KEY").ok())
-            .or(config_file.radarr.api_key)
-            .context(
-                "Radarr API key is required. Set via --radarr-api-key, RADARR_API_KEY env var, or [radarr] api_key in the config file.",
-            )?;
+            .or(config_file.radarr.api_key);
+
+        // Radarr is optional: Plex-only commands must run without it. Commands that
+        // need it call `require_radarr()` and get the original message.
+        let (radarr, radarr_error) = match (url, api_key) {
+            (Some(url), Some(api_key)) => (Some(RadarrConfig { url, api_key }), None),
+            (None, _) => (None, Some(RADARR_URL_REQUIRED)),
+            (Some(_), None) => (None, Some(RADARR_API_KEY_REQUIRED)),
+        };
 
         let format_str = cli_output
             .map(String::from)
@@ -200,8 +226,8 @@ impl AppConfig {
         };
 
         Ok(Self {
-            url,
-            api_key,
+            radarr,
+            radarr_error,
             output_format,
             plex,
             sonarr,
@@ -209,14 +235,48 @@ impl AppConfig {
             cleanup_defaults,
         })
     }
+
+    /// Radarr connection for commands that need it, or the original
+    /// "Radarr URL/API key is required" error.
+    pub fn require_radarr(&self) -> Result<&RadarrConfig> {
+        match (&self.radarr, self.radarr_error) {
+            (Some(r), _) => Ok(r),
+            (None, Some(msg)) => bail!(msg),
+            (None, None) => bail!(RADARR_URL_REQUIRED),
+        }
+    }
+}
+
+/// Default config path: `$XDG_CONFIG_HOME/<app>/config.toml`, falling back to
+/// `~/.config/<app>/config.toml`. Applied on every platform.
+///
+/// Per the XDG spec a relative `XDG_CONFIG_HOME` is ignored.
+pub fn default_config_path(
+    xdg_config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+    app: &str,
+) -> Option<PathBuf> {
+    let base = match xdg_config_home {
+        Some(p) if p.is_absolute() => p,
+        _ => home?.join(".config"),
+    };
+    Some(base.join(app).join("config.toml"))
+}
+
+fn env_path(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
 }
 
 pub fn config_path(cli_path: Option<&str>) -> Option<PathBuf> {
-    if let Some(p) = cli_path {
-        Some(PathBuf::from(p))
-    } else {
-        directories::ProjectDirs::from("", "", "cleanarr")
-            .map(|dirs| dirs.config_dir().join("config.toml"))
+    match cli_path {
+        Some(p) => Some(PathBuf::from(p)),
+        None => default_config_path(env_path("XDG_CONFIG_HOME"), home_dir(), "cleanarr"),
     }
 }
 
@@ -250,67 +310,111 @@ impl ConfigUpdates {
     }
 }
 
+/// Fetch (creating if needed) a top-level table, so unknown keys and comments
+/// elsewhere in the document survive untouched.
+fn doc_table<'a>(doc: &'a mut toml_edit::DocumentMut, name: &str) -> &'a mut toml_edit::Table {
+    if !doc.contains_table(name) {
+        let mut table = toml_edit::Table::new();
+        table.set_implicit(false);
+        doc.insert(name, toml_edit::Item::Table(table));
+    }
+    doc[name]
+        .as_table_mut()
+        .expect("just inserted a table at this key")
+}
+
+fn apply_updates(doc: &mut toml_edit::DocumentMut, updates: ConfigUpdates) {
+    for (table, key, val) in [
+        ("radarr", "url", updates.radarr_url),
+        ("radarr", "api_key", updates.radarr_api_key),
+        ("plex", "url", updates.plex_url),
+        ("plex", "token", updates.plex_token),
+        ("plex", "client_id", updates.plex_client_id),
+        ("sonarr", "url", updates.sonarr_url),
+        ("sonarr", "api_key", updates.sonarr_api_key),
+        ("cleanup", "default_max_size", updates.default_max_size),
+        ("cleanup", "default_strategy", updates.default_strategy),
+    ] {
+        if let Some(val) = val {
+            doc_table(doc, table)[key] = toml_edit::value(val);
+        }
+    }
+
+    if let Some(tags) = updates.protected_tags {
+        let arr: toml_edit::Array = tags.into_iter().collect();
+        doc_table(doc, "cleanup")["protected_tags"] = toml_edit::value(arr);
+    }
+}
+
 pub fn save_to_config(cli_path: Option<&str>, updates: ConfigUpdates) -> Result<PathBuf> {
     let path = config_path(cli_path).context("Could not determine config directory")?;
 
-    let mut config = if path.exists() {
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-        toml::from_str(&content)
-            .with_context(|| format!("Invalid config file: {}", path.display()))?
+    let existing = if path.exists() {
+        std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read config file: {}", path.display()))?
     } else {
-        ConfigFile::default()
+        String::new()
     };
 
-    if let Some(url) = updates.radarr_url {
-        config.radarr.url = Some(url);
-    }
-    if let Some(api_key) = updates.radarr_api_key {
-        config.radarr.api_key = Some(api_key);
-    }
-    if let Some(url) = updates.plex_url {
-        config.plex.url = Some(url);
-    }
-    if let Some(token) = updates.plex_token {
-        config.plex.token = Some(token);
-    }
-    if let Some(id) = updates.plex_client_id {
-        config.plex.client_id = Some(id);
-    }
-    if let Some(url) = updates.sonarr_url {
-        config.sonarr.url = Some(url);
-    }
-    if let Some(key) = updates.sonarr_api_key {
-        config.sonarr.api_key = Some(key);
-    }
-    if let Some(tags) = updates.protected_tags {
-        config.cleanup.protected_tags = tags;
-    }
-    if let Some(v) = updates.default_max_size {
-        config.cleanup.default_max_size = Some(v);
-    }
-    if let Some(v) = updates.default_strategy {
-        config.cleanup.default_strategy = Some(v);
-    }
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .with_context(|| format!("Invalid config file: {}", path.display()))?;
+    apply_updates(&mut doc, updates);
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
-    }
-
-    let content = toml::to_string_pretty(&config).context("Failed to serialize config")?;
-    std::fs::write(&path, content)
-        .with_context(|| format!("Failed to write config file: {}", path.display()))?;
+    write_private_atomic(&path, &doc.to_string())?;
 
     Ok(path)
 }
 
+/// Write `content` to `path` via a temp file in the same directory followed by a
+/// rename, so an interrupted write leaves the previous file intact. On Unix the
+/// file is created with mode 0600 because it holds API keys and the Plex token.
+pub(crate) fn write_private_atomic(path: &Path, content: &str) -> Result<()> {
+    use std::io::Write;
+
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
+
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.toml".to_string());
+    let tmp = parent.join(format!(".{}.{}.tmp", file_name, std::process::id()));
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+
+    let write = (|| -> std::io::Result<()> {
+        let mut file = opts.open(&tmp)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::from(e))
+            .with_context(|| format!("Failed to write config file: {}", path.display()));
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::from(e))
+            .with_context(|| format!("Failed to write config file: {}", path.display()));
+    }
+
+    Ok(())
+}
+
 pub fn load_config_file(cli_path: Option<&str>) -> Result<ConfigFile> {
-    let path = if let Some(p) = cli_path {
-        PathBuf::from(p)
-    } else if let Some(dirs) = directories::ProjectDirs::from("", "", "cleanarr") {
-        dirs.config_dir().join("config.toml")
-    } else {
+    let Some(path) = config_path(cli_path) else {
         return Ok(ConfigFile::default());
     };
 
@@ -346,6 +450,100 @@ mod tests {
             merge_tags([a.as_slice(), b.as_slice()]),
             vec!["Keep", "kids", "4k"]
         );
+    }
+
+    #[test]
+    fn merge_tags_trims_and_drops_empty() {
+        // `--exclude-tag "keep, kids"` splits into ["keep", " kids"].
+        let cli = vec!["keep".to_string(), " kids".to_string(), "  ".to_string()];
+        let env = vec![" KIDS ".to_string(), "4k\t".to_string()];
+        assert_eq!(
+            merge_tags([cli.as_slice(), env.as_slice()]),
+            vec!["keep", "kids", "4k"]
+        );
+    }
+
+    #[test]
+    fn default_config_path_prefers_xdg_then_home() {
+        assert_eq!(
+            default_config_path(
+                Some(PathBuf::from("/xdg")),
+                Some(PathBuf::from("/home/u")),
+                "cleanarr"
+            ),
+            Some(PathBuf::from("/xdg/cleanarr/config.toml"))
+        );
+        assert_eq!(
+            default_config_path(None, Some(PathBuf::from("/home/u")), "cleanarr"),
+            Some(PathBuf::from("/home/u/.config/cleanarr/config.toml"))
+        );
+        // A relative XDG_CONFIG_HOME is ignored per the XDG spec.
+        assert_eq!(
+            default_config_path(
+                Some(PathBuf::from("relative")),
+                Some(PathBuf::from("/home/u")),
+                "radarr-cli"
+            ),
+            Some(PathBuf::from("/home/u/.config/radarr-cli/config.toml"))
+        );
+        assert_eq!(default_config_path(None, None, "cleanarr"), None);
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("cleanarr-test-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn save_preserves_comments_and_unknown_keys() {
+        let dir = temp_dir("save-preserve");
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "# my notes\n[cleanup]\nnotify_email = \"me@example.com\"\n",
+        )
+        .unwrap();
+
+        let updates = ConfigUpdates {
+            plex_token: Some("TOKEN".into()),
+            protected_tags: Some(vec!["keep".into()]),
+            ..Default::default()
+        };
+        save_to_config(Some(path.to_str().unwrap()), updates).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my notes"), "{text}");
+        assert!(text.contains("notify_email = \"me@example.com\""), "{text}");
+
+        let parsed: ConfigFile = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.plex.token.as_deref(), Some("TOKEN"));
+        assert_eq!(parsed.cleanup.protected_tags, vec!["keep"]);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_creates_file_with_mode_600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("save-mode");
+        let path = dir.join("config.toml");
+        let updates = ConfigUpdates {
+            radarr_api_key: Some("SECRET".into()),
+            ..Default::default()
+        };
+        save_to_config(Some(path.to_str().unwrap()), updates).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "mode was {mode:o}");
+
+        let parsed: ConfigFile = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed.radarr.api_key.as_deref(), Some("SECRET"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
